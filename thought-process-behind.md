@@ -43,10 +43,9 @@
 
 # TABLES
 
-| RAM     |
-| ------- |
-| Pointer |
-| Value   |
+| motherboard |
+| ----------- |
+| BYTEA ram   |
 
 | Fixed_Array   |
 | ------------- |
@@ -65,3 +64,8 @@ The only essential table is RAM, where we store everything.
 Array has first pointer and is stored in ram, the next pointer of it is the next element. Thats why we need size & firt_pointer
 Capacity>size, else resize.
 linked list has head, which points to next element, the next element stores prev ptr, value, next ptr.
+
+# RAM LOGIC
+
+Must make malloc, which hands registers of (size)
+Free methods also.
