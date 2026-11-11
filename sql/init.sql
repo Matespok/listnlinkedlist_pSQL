@@ -48,19 +48,15 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION FindFreeBlock(requiredSize INT)
 RETURNS INT AS $$
 DECLARE
-ram_hex TEXT;
-FBBegginPtr INT;
-target_pattern TEXT;
+target_pattern BYTEA;
 hex_pos INT;
 byte_pos INT;
 BEGIN
-  SELECT encode(ram_slot, 'hex') INTO ram_hex FROM motherboard WHERE id=1;
-  target_pattern := repeat('00', requiredSize);
-  hex_pos := position (target_pattern IN ram_hex);
-  IF hex_pos = 0 THEN
+  target_pattern := decode(repeat('00', requiredSize), 'hex');
+  SELECT position(target_pattern IN ram_slot) INTO byte_pos FROM motherboard WHERE id=1;
+  IF byte_pos = 0 THEN
     RETURN -1; -- full memory
   END IF;
-  byte_pos := (hex_pos - 1) / 2 + 1; -- hex-1: the first beggining of the byte, cuz hex = 2 bytes
   RETURN byte_pos;
 END;
 $$ LANGUAGE plpgsql;
