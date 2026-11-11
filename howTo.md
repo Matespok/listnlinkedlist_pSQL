@@ -27,7 +27,7 @@ SELECT convert_from(
   SELECT convert_from(
     substring(ram_slot from 101 for 15),
     'UTF8'
-    ) FROM motherboard WHERE id = <motherboard>;
+    ) FROM motherboard WHERE id = 1;
   ```
   Returns text from pointer 100, that is 15 bytes long.
 
