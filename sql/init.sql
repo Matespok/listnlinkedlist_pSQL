@@ -62,4 +62,58 @@ END;
 $$ LANGUAGE plpgsql;
 
 
+-- Linked list
+
+CREATE TABLE IF NOT EXISTS Linked_List_Headers(
+  name TEXT,
+  head_pointer INT 
+);
+
+CREATE OR REPLACE FUNCTION InitializeLinkedList(list_name TEXT, firstValue TEXT)
+RETURNS VOID AS $$
+DECLARE
+  nodePtr INT;
+  textPtr INT;
+BEGIN
+  SELECT FindFreeBlock(octet_length(firstValue) + 1) INTO textPtr;
+  PERFORM WriteText(textPtr, (firstValue || chr(3))); --char 3 - ETX - end of text
+  SELECT FindFreeBlock(8) INTO nodePtr;
+  PERFORM WriteText(nodePtr, lpad(textPtr::text, 4, '0'));
+  PERFORM WriteText(nodePtr + 4, '0000'); -- end of linked list
+  INSERT INTO Linked_List_Headers VALUES (list_name, nodePtr);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION LLAddNode(value TEXT, list_name TEXT)
+RETURNS VOID AS $$
+DECLARE
+  curr_node INT;
+  next_node INT;
+  value_ptr INT;
+BEGIN
+  SELECT head_pointer INTO curr_node FROM Linked_List_Headers WHERE name = list_name;
+  IF curr_node IS NULL THEN
+    RAISE EXCEPTION 'Linked list % does not exist!', list_name;
+  END IF;
+  
+  LOOP
+    next_node := ReadText(curr_node+4, 4)::INT;
+    IF next_node = 0 THEN
+      EXIT;
+    END IF;
+    curr_node := next_node;
+  END LOOP;
+
+  --write value
+  SELECT FindFreeBlock(octet_length(value) + 1) INTO value_ptr;
+  PERFORM WriteText(value_ptr, (value || chr(3)));
+  --allocate node
+  SELECT FindFreeBlock(8) INTO next_node;
+  PERFORM WriteText(next_node, lpad(value_ptr::text, 4, '0'));
+  PERFORM WriteText(next_node + 4, '0000');
+  --write next node to next node pointer of the previous node
+  PERFORM WriteText(curr_node+4, lpad(next_node::text, 4, '0'));
+END;
+$$ LANGUAGE plpgsql;
+
 
