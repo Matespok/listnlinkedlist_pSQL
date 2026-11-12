@@ -7,8 +7,8 @@ It's linked list and list over fixed array with whole backend in PL/PGSQL. I had
 ## Topologies used:
 
 1. Docker
-2. PostgreSQL
-3. PHP
+2. PostgreSQL; 16 alpine
+3. PHP 8.2 apache
 
 ## Running localy:
 
