@@ -1,11 +1,30 @@
 <?php
 session_start();
 
-$dbHost = getenv('DB_HOST') ?: 'localhost';
-$dbPort = getenv('DB_PORT') ?: '5432';
-$dbUser = getenv('DB_USER') ?: 'username';
-$dbPass = getenv('DB_PASS') ?: 'pass';
-$dbName = getenv('DB_NAME') ?: 'ramlmao';
+// Načtení .env souboru z root adresáře (o úroveň výš než src/)
+$envPath = dirname(__DIR__) . '/.env';
+if (is_readable($envPath)) {
+    $lines = file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        $line = trim($line);
+        // Ignorování komentářů a řádků bez '='
+        if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) {
+            continue;
+        }
+        [$key, $val] = explode('=', $line, 2);
+        $key = trim($key);
+        $val = trim($val, " \t\n\r\0\x0B\"'"); // Ořízne mezery i případné uvozovky
+
+        putenv("$key=$val");
+        $_ENV[$key] = $val;
+    }
+}
+
+$dbHost = getenv('host') ?: getenv('DB_HOST') ?: 'localhost';
+$dbPort = getenv('port') ?: getenv('DB_PORT') ?: '5432';
+$dbUser = getenv('user') ?: getenv('DB_USER') ?: 'username';
+$dbPass = getenv('pass') ?: getenv('DB_PASS') ?: 'pass';
+$dbName = getenv('db')   ?: getenv('DB_NAME') ?: 'ramlmao';
 
 try {
     $pdo = new PDO("pgsql:host=$dbHost;port=$dbPort;dbname=$dbName", $dbUser, $dbPass, [
