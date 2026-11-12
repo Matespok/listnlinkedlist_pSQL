@@ -58,4 +58,4 @@ Tables for this:
 
 ---
 
-AI USAGE: AI has been used for research, frontend(src/index.php as a whole), and to locate mistakes, or corret logic errors on backend. Therefore i wrote 8 hours on this project: https://hackatime.hackclub.com/@matespok/project/linkednlist
+AI USAGE: AI has been used for research, frontend(src/index.php as a whole), and to locate mistakes, or corret logic errors on backend. Therefore i wrote 8 hours on this project: https://hackatime.hackclub.com/@matespok/project/linkednlist . 8 hours not counting thinking about the project itself, educating myself on the topic and writing some notes...
