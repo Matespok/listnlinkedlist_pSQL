@@ -162,10 +162,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-/*
-
-
-*/
 CREATE OR REPLACE FUNCTION LLDeleteNode(list_name TEXT, target_val TEXT)
 RETURNS VOID AS $$
 DECLARE
@@ -212,3 +208,153 @@ $$ LANGUAGE plpgsql;
 
 
 -- List over fixed array
+CREATE TABLE IF NOT EXISTS Fixed_Array_Headers (
+  name TEXT PRIMARY KEY,
+  first_pointer INT,
+  capacity INT,
+  size INT);
+
+
+CREATE OR REPLACE FUNCTION InitializeArray(array_name TEXT, first_val TEXT)
+RETURNS VOID AS $$
+DECLARE
+  val_ptr INT;
+  arr_ptr INT;
+  init_cap INT := 2; 
+BEGIN
+  SELECT FindFreeBlock(octet_length(first_val) + 1) INTO val_ptr;
+  IF val_ptr = -1 THEN
+    RAISE EXCEPTION 'Out of Memory při alokaci textu';
+  END IF;
+  PERFORM WriteText(val_ptr, first_val || chr(3));
+
+  SELECT FindFreeBlock(init_cap * 4) INTO arr_ptr;
+  IF arr_ptr = -1 THEN
+    RAISE EXCEPTION 'Out of Memory při alokaci pole';
+  END IF;
+
+  PERFORM WriteText(arr_ptr, lpad(val_ptr::text, 4, '0')); --leftpad for ptrs under 3 chars
+
+  INSERT INTO Fixed_Array_Headers (name, first_pointer, capacity, size)
+  VALUES (array_name, arr_ptr, init_cap, 1);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION ResizeArray(array_name TEXT)
+RETURNS VOID AS $$
+DECLARE
+  curr_ptr INT;
+  curr_cap INT;
+  curr_size INT;
+  new_cap INT;
+  new_ptr INT;
+BEGIN
+  SELECT first_pointer, capacity, size
+  INTO curr_ptr, curr_cap, curr_size
+  FROM Fixed_Array_Headers WHERE name = array_name;
+
+  IF curr_ptr IS NULL THEN
+    RAISE EXCEPTION 'Pole % neexistuje!', array_name;
+  END IF;
+
+  new_cap := curr_cap * 2;
+  SELECT FindFreeBlock(new_cap * 4) INTO new_ptr;
+  IF new_ptr = -1 THEN
+    RAISE EXCEPTION 'Out of Memory při zvětšování pole %', array_name;
+  END IF;
+  PERFORM CopyBytes(curr_ptr, new_ptr, curr_size * 4);
+  PERFORM Free(curr_ptr, curr_cap * 4);
+  UPDATE Fixed_Array_Headers
+  SET first_pointer = new_ptr, capacity = new_cap
+  WHERE name = array_name;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION AddToArray(value TEXT, array_name TEXT)
+RETURNS VOID AS $$
+DECLARE
+  curr_ptr INT;
+  curr_cap INT;
+  curr_size INT;
+  val_ptr INT;
+BEGIN
+  SELECT first_pointer, capacity, size
+  INTO curr_ptr, curr_cap, curr_size
+  FROM Fixed_Array_Headers WHERE name = array_name;
+  IF curr_ptr IS NULL THEN
+    RAISE EXCEPTION 'Pole % neexistuje!', array_name;
+  END IF;
+  PERFORM WriteText(val_ptr, value || chr(3));
+  
+  PERFORM WriteText(curr_ptr + (curr_size * 4), lpad(val_ptr::text, 4, '0'));
+  
+  UPDATE Fixed_Array_Headers
+  SET size = curr_size + 1
+  WHERE name = array_name;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION GetValueAtIndex(target_index INT, array_name TEXT)
+RETURNS TEXT AS $$
+DECLARE
+  curr_ptr INT;
+  curr_size INT;
+  val_ptr INT;
+BEGIN
+  SELECT first_pointer, size
+  INTO curr_ptr, curr_size
+  FROM Fixed_Array_Headers WHERE name = array_name;
+  
+  IF curr_ptr IS NULL OR target_index < 0 OR target_index >= curr_size THEN
+    RETURN NULL;
+  END IF;
+  
+  val_ptr := ReadText(curr_ptr + (target_index * 4), 4)::INT;
+  RETURN ReadString(val_ptr);
+END;
+$$ LANGUAGE plpgsql;
+
+/*
+We will create the fixed_array_headers with First_Pointer, Capacity and Size
+
+
+
+InitializeArray(array_name TEXT, first_val TEXT)
+First we will find a free block of octet_length(value)*2;
+Write the first value into memory on that pointer
+save beggining pointer into fixed array
++2 to capacity or atleast count of bytes into capacity;
+size will be the taken space of the capacity.
+Everything else is 0, so alocated.
+
+ResizeArray(array_name TEXT)
+array := select ReadMemory(first_pointer, capacity)
+pointer_for_new_array := FindFreeBlock(capacity*2)
+new_array := array || repeat('00', capacity);
+WriteText(pointer_for_new_array, new_array);
+Free(first_pointer, capacity);
+UPDATE Fixed_array(First_Pointer, Capacity) WHERE name = name
+VALUES(pointer_for_new_array, capacity*2);
+
+AddToArray(value TEXT, array_name TEXT)
+if(Capacity > size + value)
+ResizeArray(array_name);
+end if;
+pointer_to_insert := first_pointer+size+1 
+WriteText(pointer_to_insert, value)
+
+RemoveValueFromArray(value TEXT, array_name TEXT)
+array_ram_dump TEXT;(read whole array by method ReadText)
+find first appearance by position(value in array_ram_dump)
+delete the text and concat it together without the appearance of the value we wanted to delete(from ch(3) to ch(3))
+write it again to the memory and update the size.
+
+GetValueAtIndex(index INT, array_name TEXT){
+find the appearance of index times ch(3) and then read by and give it out(returns TEXT)
+
+GetAllValues(array_name TEXT)
+reads by ReadString and then continues by the next pointer after counting on the ch(3)
+writes it into a table.
+Returns a table.
+And by apearance of more than 3 0s we will not count the string and make it empty. -> end and return
+*/
