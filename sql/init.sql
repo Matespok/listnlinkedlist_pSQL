@@ -224,15 +224,16 @@ DECLARE
 BEGIN
   SELECT FindFreeBlock(octet_length(first_val) + 1) INTO val_ptr;
   IF val_ptr = -1 THEN
-    RAISE EXCEPTION 'Out of Memory při alokaci textu';
+    RAISE EXCEPTION 'Out of Memory';
   END IF;
   PERFORM WriteText(val_ptr, first_val || chr(3));
 
   SELECT FindFreeBlock(init_cap * 4) INTO arr_ptr;
   IF arr_ptr = -1 THEN
-    RAISE EXCEPTION 'Out of Memory při alokaci pole';
+    RAISE EXCEPTION 'Out of Memory';
   END IF;
-
+  
+  PERFORM WriteText(arr_ptr, repeat('0000', init_cap)); -- allocate
   PERFORM WriteText(arr_ptr, lpad(val_ptr::text, 4, '0')); --leftpad for ptrs under 3 chars
 
   INSERT INTO Fixed_Array_Headers (name, first_pointer, capacity, size)
@@ -254,16 +255,17 @@ BEGIN
   FROM Fixed_Array_Headers WHERE name = array_name;
 
   IF curr_ptr IS NULL THEN
-    RAISE EXCEPTION 'Pole % neexistuje!', array_name;
+    RAISE EXCEPTION 'array % does not exist!', array_name;
   END IF;
 
   new_cap := curr_cap * 2;
   SELECT FindFreeBlock(new_cap * 4) INTO new_ptr;
   IF new_ptr = -1 THEN
-    RAISE EXCEPTION 'Out of Memory při zvětšování pole %', array_name;
+    RAISE EXCEPTION 'Out of Memory';
   END IF;
   
---pointer move
+  PERFORM WriteText(new_ptr, repeat('0000', new_cap)); -- allocate
+  --pointer move
   PERFORM WriteText(new_ptr, ReadText(curr_ptr, curr_size * 4));
   PERFORM Free(curr_ptr, curr_cap * 4);
 
@@ -348,19 +350,19 @@ BEGIN
   IF curr_ptr IS NULL OR target_index < 0 OR target_index >= curr_size THEN
     RETURN;
   END IF;
-
+  
   slot_ptr := curr_ptr + (target_index * 4);
   val_ptr := ReadText(slot_ptr, 4)::INT;
   curr_str := ReadString(val_ptr);
   PERFORM Free(val_ptr, octet_length(curr_str) + 1);
-
+  -- move em left
   tail_bytes := (curr_size - 1 - target_index) * 4;
   IF tail_bytes > 0 THEN
     tail_pointers := ReadText(slot_ptr + 4, tail_bytes);
     PERFORM WriteText(slot_ptr, tail_pointers);
   END IF;
 
-  PERFORM Free(curr_ptr + ((curr_size - 1) * 4), 4);
+PERFORM WriteText(curr_ptr + ((curr_size - 1) * 4), '0000'); --allocate free slot int the end
 
   UPDATE Fixed_Array_Headers
   SET size = curr_size - 1

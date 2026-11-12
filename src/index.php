@@ -13,25 +13,61 @@ try {
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC
     ]);
 } catch (Exception $e) {
-    die("Nelze se připojit k PostgreSQL: " . htmlspecialchars($e->getMessage()));
+    die("Nelze se spojit s DB: " . htmlspecialchars($e->getMessage()));
 }
 
-/* ==========================================================
-   DNY ULOŽENY ČISTĚ V JEDNOM SPOJOVÉM SEZNAMU 'days'
-   Používají se přímo SQL metody z init.sql:
-   - InitializeLinkedList('days', firstValue)
-   - LLAddNode(value, 'days')
-   - LLGetAll('days')
-   - LLDeleteNode('days', target_val)
-========================================================== */
+/* ==========================================================================
+   BACKEND PROPOJENÍ NA METODY Z init.sql:
+   - Dny (spojový seznam):
+       InitializeLinkedList('days', firstValue)
+       LLAddNode(value, 'days')
+       LLGetAll('days')
+       LLDeleteNode('days', target_val)
+   - Záznamy dne (seznam nad polem):
+       InitializeArray(array_name, first_val)
+       AddToArray(value, array_name)
+       GetAllValues(array_name)
+       GetValueAtIndex(index, array_name)
+       RemoveAtIndex(index, array_name)
+       Fixed_Array_Headers tabulka
+========================================================================== */
 
-function getDays(PDO $pdo): array {
+function getDaysList(PDO $pdo): array {
     try {
         $stmt = $pdo->query("SELECT val FROM LLGetAll('days')");
+        $days = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return is_array($days) ? $days : [];
+    } catch (Exception $e) {
+        return [];
+    }
+}
+
+function getEntriesForDay(PDO $pdo, string $date): array {
+    $arrName = 'day_' . $date;
+    try {
+        $stmt = $pdo->prepare("SELECT val FROM GetAllValues(:name)");
+        $stmt->execute(['name' => $arrName]);
         $res = $stmt->fetchAll(PDO::FETCH_COLUMN);
         return is_array($res) ? $res : [];
     } catch (Exception $e) {
-        return [];
+        // Fallback pro bezpečné čtení po indexech přes GetValueAtIndex
+        try {
+            $stmtHeader = $pdo->prepare("SELECT size FROM Fixed_Array_Headers WHERE name = :name");
+            $stmtHeader->execute(['name' => $arrName]);
+            $size = (int)$stmtHeader->fetchColumn();
+            $items = [];
+            for ($i = 0; $i < $size; $i++) {
+                $stmtVal = $pdo->prepare("SELECT GetValueAtIndex(:idx, :name)");
+                $stmtVal->execute(['idx' => $i, 'name' => $arrName]);
+                $val = $stmtVal->fetchColumn();
+                if ($val !== null && $val !== false) {
+                    $items[] = $val;
+                }
+            }
+            return $items;
+        } catch (Exception $e2) {
+            return [];
+        }
     }
 }
 
@@ -41,174 +77,258 @@ function parseCzechDate(string $d): ?DateTimeImmutable {
     return ($dt && $dt->format('d.m.Y') === $d) ? $dt : null;
 }
 
-// Obsluha akcí
+// Obsluha formulářových akcí
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
     try {
-        if ($action === 'novy_den') {
+        if ($action === 'novy') {
             $rawDate = trim($_POST['date'] ?? '');
-            $dt = parseCzechDate($rawDate);
+            $text = trim($_POST['text'] ?? '');
 
+            $dt = parseCzechDate($rawDate);
             if (!$dt) {
                 $_SESSION['flash'] = "Chybný formát data. Zadejte datum ve formátu dd.MM.yyyy (např. 12.11.2026).";
+                $_SESSION['flashType'] = 'error';
+                header("Location: ?modal=novy&date=" . urlencode($rawDate) . "&text=" . urlencode($text));
+                exit;
+            }
+
+            if ($text === '') {
+                $_SESSION['flash'] = "Záznam nesmí být prázdný.";
                 $_SESSION['flashType'] = 'error';
                 header("Location: ?modal=novy&date=" . urlencode($rawDate));
                 exit;
             }
 
             $dateFormatted = $dt->format('d.m.Y');
-            $days = getDays($pdo);
-            $currIdx = isset($_GET['idx']) ? (int)$_GET['idx'] : 0;
-            if ($currIdx < 0 || $currIdx >= count($days)) {
-                $currIdx = 0;
+            $days = getDaysList($pdo);
+            $currIndex = isset($_GET['day_idx']) ? (int)$_GET['day_idx'] : 0;
+            if ($currIndex < 0 || $currIndex >= count($days)) {
+                $currIndex = 0;
             }
-            $currentDayStr = $days[$currIdx] ?? null;
+            $currentDayStr = $days[$currIndex] ?? null;
 
+            // 1. Prázdný deník -> vytvoření prvního dne a prvního pole
             if (empty($days)) {
-                // Deník je prázdný -> vytvoříme první uzel v 'days'
+                $pdo->beginTransaction();
                 $stmt = $pdo->prepare("SELECT InitializeLinkedList('days', :date)");
                 $stmt->execute(['date' => $dateFormatted]);
-                $_SESSION['flash'] = "Vytvořen první den: $dateFormatted.";
-                $_SESSION['flashType'] = 'success';
-                header("Location: ?idx=0");
-                exit;
-            }
 
-            // Již existuje tento den v seznamu?
-            if (in_array($dateFormatted, $days, true)) {
-                $foundIdx = array_search($dateFormatted, $days, true);
-                $_SESSION['flash'] = "Den $dateFormatted již v seznamu existuje.";
-                $_SESSION['flashType'] = 'info';
-                header("Location: ?idx=$foundIdx");
+                $stmtArr = $pdo->prepare("SELECT InitializeArray(:name, :firstVal)");
+                $stmtArr->execute(['name' => 'day_' . $dateFormatted, 'firstVal' => $text]);
+                $pdo->commit();
+
+                $_SESSION['flash'] = "Deník založen: vytvořen první den '$dateFormatted' s novým záznamem.";
+                $_SESSION['flashType'] = 'success';
+                header("Location: ?day_idx=0");
                 exit;
             }
 
             $currentDt = parseCzechDate($currentDayStr);
-            $nextDayStr = $days[$currIdx + 1] ?? null;
+            $nextDayStr = $days[$currIndex + 1] ?? null;
             $nextDt = $nextDayStr ? parseCzechDate($nextDayStr) : null;
 
-            // Kontrola pravidla: Datum mezi aktuálním a následujícím dnem
-            if ($nextDt && ($dt > $currentDt && $dt < $nextDt)) {
-                // Vložit nový den za aktuální
+            if ($dateFormatted === $currentDayStr) {
+                // A) Datum = aktuální den -> přidat na konec seznamu záznamů dne
+                $arrName = 'day_' . $dateFormatted;
+                $stmtCheck = $pdo->prepare("SELECT first_pointer FROM Fixed_Array_Headers WHERE name = :name");
+                $stmtCheck->execute(['name' => $arrName]);
+                $exists = $stmtCheck->fetchColumn();
+
+                if ($exists !== false && $exists !== null) {
+                    $stmtAdd = $pdo->prepare("SELECT AddToArray(:val, :name)");
+                    $stmtAdd->execute(['val' => $text, 'name' => $arrName]);
+                } else {
+                    $stmtInit = $pdo->prepare("SELECT InitializeArray(:name, :val)");
+                    $stmtInit->execute(['name' => $arrName, 'val' => $text]);
+                }
+
+                $_SESSION['flash'] = "Záznam byl přidán do dne $dateFormatted.";
+                $_SESSION['flashType'] = 'success';
+                header("Location: ?day_idx=$currIndex");
+                exit;
+
+            } elseif ($nextDt && ($dt > $currentDt && $dt < $nextDt)) {
+                // B) Datum mezi aktuálním a následujícím dnem -> vznikne nový den za aktuálním
                 $newDays = [];
-                for ($i = 0; $i <= $currIdx; $i++) {
+                for ($i = 0; $i <= $currIndex; $i++) {
                     $newDays[] = $days[$i];
                 }
                 $newDays[] = $dateFormatted;
-                for ($i = $currIdx + 1; $i < count($days); $i++) {
+                for ($i = $currIndex + 1; $i < count($days); $i++) {
                     $newDays[] = $days[$i];
                 }
 
                 $pdo->beginTransaction();
                 $pdo->exec("DELETE FROM Linked_List_Headers WHERE name = 'days'");
-                $stmt = $pdo->prepare("SELECT InitializeLinkedList('days', :val)");
-                $stmt->execute(['val' => $newDays[0]]);
+                $stmtInit = $pdo->prepare("SELECT InitializeLinkedList('days', :val)");
+                $stmtInit->execute(['val' => $newDays[0]]);
 
                 $stmtAdd = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
                 for ($i = 1; $i < count($newDays); $i++) {
                     $stmtAdd->execute(['val' => $newDays[$i]]);
                 }
+
+                $stmtArr = $pdo->prepare("SELECT InitializeArray(:name, :firstVal)");
+                $stmtArr->execute(['name' => 'day_' . $dateFormatted, 'firstVal' => $text]);
                 $pdo->commit();
 
-                $newIdx = $currIdx + 1;
-                $_SESSION['flash'] = "Den $dateFormatted byl vložen za aktuální den.";
+                $newIndex = $currIndex + 1;
+                $_SESSION['flash'] = "Nový den '$dateFormatted' byl vložen za aktuální den.";
                 $_SESSION['flashType'] = 'success';
-                header("Location: ?idx=$newIdx");
+                header("Location: ?day_idx=$newIndex");
                 exit;
 
             } elseif (!$nextDt && ($dt > $currentDt)) {
-                // Jsme na konci a datum je vyšší -> přidat na konec přes LLAddNode
-                $stmt = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
-                $stmt->execute(['val' => $dateFormatted]);
+                // C) Datum za posledním dnem
+                $pdo->beginTransaction();
+                $stmtAdd = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
+                $stmtAdd->execute(['val' => $dateFormatted]);
 
-                $newIdx = count($days);
-                $_SESSION['flash'] = "Den $dateFormatted byl přidán na konec seznamu.";
+                $stmtArr = $pdo->prepare("SELECT InitializeArray(:name, :firstVal)");
+                $stmtArr->execute(['name' => 'day_' . $dateFormatted, 'firstVal' => $text]);
+                $pdo->commit();
+
+                $newIndex = count($days);
+                $_SESSION['flash'] = "Nový den '$dateFormatted' byl přidán na konec deníku.";
                 $_SESSION['flashType'] = 'success';
-                header("Location: ?idx=$newIdx");
+                header("Location: ?day_idx=$newIndex");
                 exit;
 
             } else {
-                // Zápis odmítnut
+                // D) Zápis odmítnut
                 $range = $currentDayStr;
                 if ($nextDayStr) {
                     $range .= " a $nextDayStr";
                 } else {
                     $range .= " a novější";
                 }
-                $_SESSION['flash'] = "Zápis odmítnut! Datum musí ležet mezi $range.";
+                $_SESSION['flash'] = "Zápis odmítnut! Dle zadání musí být datum rovno aktuálnímu dni ($currentDayStr) nebo ležet mezi $range.";
                 $_SESSION['flashType'] = 'error';
-                header("Location: ?idx=$currIdx");
+                header("Location: ?day_idx=$currIndex");
                 exit;
             }
 
-        } elseif ($action === 'smaz_den') {
-            $currIdx = (int)($_POST['idx'] ?? 0);
-            $targetDate = $_POST['date'] ?? '';
+        } elseif ($action === 'smaz_potvrzeno') {
+            // Smazání záznamu dne přes RemoveAtIndex
+            $currIndex = (int)($_POST['day_idx'] ?? 0);
+            $entryIdx = (int)($_POST['entry_idx'] ?? -1);
+            $days = getDaysList($pdo);
+            $currentDayStr = $days[$currIndex] ?? null;
 
-            if ($targetDate !== '') {
-                $stmt = $pdo->prepare("SELECT LLDeleteNode('days', :date)");
-                $stmt->execute(['date' => $targetDate]);
+            if ($currentDayStr && $entryIdx >= 0) {
+                $arrName = 'day_' . $currentDayStr;
 
-                $days = getDays($pdo);
-                if (empty($days)) {
-                    $_SESSION['flash'] = "Den $targetDate byl smazán. Seznam dnů je nyní prázdný.";
+                $stmt = $pdo->prepare("SELECT RemoveAtIndex(:idx, :name)");
+                $stmt->execute(['idx' => $entryIdx, 'name' => $arrName]);
+
+                // Zbývají v daném dni ještě nějaké záznamy?
+                $stmtHeader = $pdo->prepare("SELECT size FROM Fixed_Array_Headers WHERE name = :name");
+                $stmtHeader->execute(['name' => $arrName]);
+                $size = (int)$stmtHeader->fetchColumn();
+
+                if ($size <= 0) {
+                    // "Den bez záznamů zmizí. Pak se zobrazí následující den, když není, tak předchozí."
+                    $pdo->prepare("DELETE FROM Fixed_Array_Headers WHERE name = :name")->execute(['name' => $arrName]);
+                    $pdo->prepare("SELECT LLDeleteNode('days', :date)")->execute(['date' => $currentDayStr]);
+
+                    $remainingDays = getDaysList($pdo);
+                    if (empty($remainingDays)) {
+                        $_SESSION['flash'] = "Záznam byl smazán. Den '$currentDayStr' byl bez záznamů odstraněn. Deník je prázdný.";
+                        $_SESSION['flashType'] = 'success';
+                        header("Location: ?");
+                        exit;
+                    }
+
+                    if ($currIndex >= count($remainingDays)) {
+                        $currIndex = max(0, count($remainingDays) - 1);
+                    }
+                    $_SESSION['flash'] = "Záznam smazán. Den '$currentDayStr' byl bez záznamů odstraněn.";
                     $_SESSION['flashType'] = 'success';
-                    header("Location: ?");
+                    header("Location: ?day_idx=$currIndex");
                     exit;
                 }
 
-                if ($currIdx >= count($days)) {
-                    $currIdx = count($days) - 1;
-                }
-                $_SESSION['flash'] = "Den $targetDate byl úspěšně smazán ze spojového seznamu.";
+                $_SESSION['flash'] = "Záznam byl úspěšně smazán.";
                 $_SESSION['flashType'] = 'success';
-                header("Location: ?idx=$currIdx");
+                header("Location: ?day_idx=$currIndex");
                 exit;
             }
 
         } elseif ($action === 'uloz') {
-            $days = getDays($pdo);
-            $export = [
-                'linked_list' => 'days',
-                'pocet_dnu' => count($days),
-                'dny' => $days
-            ];
+            // Uložení celého deníku do JSON souboru ke stažení
+            $days = getDaysList($pdo);
+            $exportData = [];
+            foreach ($days as $d) {
+                $exportData[] = [
+                    'datum' => $d,
+                    'zaznamy' => getEntriesForDay($pdo, $d)
+                ];
+            }
+            $json = json_encode($exportData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
             header('Content-Type: application/json; charset=utf-8');
-            header('Content-Disposition: attachment; filename="dny_spojovy_seznam.json"');
-            echo json_encode($export, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+            header('Content-Disposition: attachment; filename="denik_zaloha_' . date('Y-m-d_H-i') . '.json"');
+            echo $json;
             exit;
 
         } elseif ($action === 'nacti') {
+            // Načtení deníku ze souboru a obnova v RAM
             if (isset($_FILES['file']) && $_FILES['file']['error'] === UPLOAD_ERR_OK) {
-                $data = json_decode(file_get_contents($_FILES['file']['tmp_name']), true);
-                $importDays = $data['dny'] ?? (is_array($data) ? $data : []);
+                $raw = file_get_contents($_FILES['file']['tmp_name']);
+                $data = json_decode($raw, true);
 
-                if (!empty($importDays) && is_array($importDays)) {
-                    $pdo->beginTransaction();
-                    $pdo->exec("DELETE FROM Linked_List_Headers WHERE name = 'days'");
-                    $first = array_shift($importDays);
-                    $stmt = $pdo->prepare("SELECT InitializeLinkedList('days', :val)");
-                    $stmt->execute(['val' => $first]);
-
-                    $stmtAdd = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
-                    foreach ($importDays as $d) {
-                        if (is_string($d) && trim($d) !== '') {
-                            $stmtAdd->execute(['val' => trim($d)]);
-                        }
-                    }
-                    $pdo->commit();
-
-                    $_SESSION['flash'] = "Spojový seznam dnů byl úspěšně načten ze souboru.";
-                    $_SESSION['flashType'] = 'success';
-                    header("Location: ?idx=0");
-                    exit;
-                } else {
-                    $_SESSION['flash'] = "Soubor neobsahuje platná data dnů.";
+                if (!is_array($data)) {
+                    $_SESSION['flash'] = "Chybný formát souboru (očekáván platný JSON export).";
                     $_SESSION['flashType'] = 'error';
                     header("Location: ?");
                     exit;
                 }
+
+                $pdo->beginTransaction();
+                $pdo->exec("DELETE FROM Linked_List_Headers");
+                $pdo->exec("DELETE FROM Fixed_Array_Headers");
+                $pdo->exec("UPDATE motherboard SET ram_slot = decode(repeat('00', 4096), 'hex') WHERE id = 1");
+
+                $daysToCreate = [];
+                foreach ($data as $item) {
+                    $d = $item['datum'] ?? null;
+                    $entries = $item['zaznamy'] ?? [];
+                    if ($d && !empty($entries)) {
+                        $daysToCreate[] = $d;
+                        $arrName = 'day_' . $d;
+                        $first = array_shift($entries);
+                        $stmt = $pdo->prepare("SELECT InitializeArray(:name, :val)");
+                        $stmt->execute(['name' => $arrName, 'val' => $first]);
+
+                        $stmtAdd = $pdo->prepare("SELECT AddToArray(:val, :name)");
+                        foreach ($entries as $e) {
+                            $stmtAdd->execute(['val' => $e, 'name' => $arrName]);
+                        }
+                    }
+                }
+
+                if (!empty($daysToCreate)) {
+                    $firstDay = array_shift($daysToCreate);
+                    $stmtInit = $pdo->prepare("SELECT InitializeLinkedList('days', :val)");
+                    $stmtInit->execute(['val' => $firstDay]);
+
+                    $stmtAddDay = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
+                    foreach ($daysToCreate as $d) {
+                        $stmtAddDay->execute(['val' => $d]);
+                    }
+                }
+
+                $pdo->commit();
+                $_SESSION['flash'] = "Deník byl úspěšně obnoven ze souboru.";
+                $_SESSION['flashType'] = 'success';
+                header("Location: ?day_idx=0");
+                exit;
+            } else {
+                $_SESSION['flash'] = "Chyba při nahrávání souboru.";
+                $_SESSION['flashType'] = 'error';
+                header("Location: ?");
+                exit;
             }
 
         } elseif ($action === 'zavri') {
@@ -232,18 +352,32 @@ $flash = $_SESSION['flash'] ?? null;
 $flashType = $_SESSION['flashType'] ?? 'info';
 unset($_SESSION['flash'], $_SESSION['flashType']);
 
-// Data dnů
-$days = getDays($pdo);
+// Data dnů ze spojového seznamu
+$days = getDaysList($pdo);
 $totalDays = count($days);
 
-$currIdx = isset($_GET['idx']) ? (int)$_GET['idx'] : 0;
-if ($currIdx < 0) $currIdx = 0;
-if ($totalDays > 0 && $currIdx >= $totalDays) $currIdx = $totalDays - 1;
+$currIndex = isset($_GET['day_idx']) ? (int)$_GET['day_idx'] : 0;
+if ($currIndex < 0) $currIndex = 0;
+if ($totalDays > 0 && $currIndex >= $totalDays) $currIndex = $totalDays - 1;
 
-$currentDay = $totalDays > 0 ? ($days[$currIdx] ?? null) : null;
-$deleteConfirm = isset($_GET['smaz_potvrdit']) ? $_GET['smaz_potvrdit'] : null;
+$currentDayStr = $totalDays > 0 ? ($days[$currIndex] ?? null) : null;
+$entries = $currentDayStr ? getEntriesForDay($pdo, $currentDayStr) : [];
+$totalEntries = count($entries);
 
-// RAM info
+// Potvrzení smazání
+$deleteConfirmIdx = isset($_GET['smaz_idx']) ? (int)$_GET['smaz_idx'] : null;
+$deleteConfirmText = ($deleteConfirmIdx !== null && isset($entries[$deleteConfirmIdx])) ? $entries[$deleteConfirmIdx] : null;
+
+// Informace o poli a paměti RAM pro aktuální den
+$arrayInfo = null;
+if ($currentDayStr) {
+    try {
+        $stmt = $pdo->prepare("SELECT capacity, size, first_pointer FROM Fixed_Array_Headers WHERE name = :name");
+        $stmt->execute(['name' => 'day_' . $currentDayStr]);
+        $arrayInfo = $stmt->fetch();
+    } catch (Exception $e) {}
+}
+
 $ramUsed = 0;
 try {
     $stmt = $pdo->query("SELECT encode(ram_slot, 'hex') AS hex FROM motherboard WHERE id = 1");
@@ -261,7 +395,7 @@ try {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ALM Deník – Spojový seznam dnů</title>
+    <title>Projekt ALM – Deník</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -274,7 +408,7 @@ try {
             --text-sub: #64748b;
             --border: #e2e8f0;
             --border-strong: #cbd5e1;
-            --accent: #2563eb;
+            --primary: #0f172a;
             --danger: #dc2626;
             --danger-bg: #fef2f2;
             --sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
@@ -288,11 +422,11 @@ try {
             font-family: var(--sans);
             font-size: 14px;
             line-height: 1.5;
-            padding: 28px 16px;
+            padding: 24px 16px;
         }
 
-        .window {
-            max-width: 780px;
+        .app-window {
+            max-width: 880px;
             margin: 0 auto;
             background: var(--surface);
             border: 1px solid var(--border-strong);
@@ -303,7 +437,7 @@ try {
         }
 
         /* Top Header */
-        header {
+        .window-header {
             padding: 16px 20px;
             border-bottom: 2px solid var(--text-main);
             display: flex;
@@ -312,26 +446,22 @@ try {
             flex-wrap: wrap;
             gap: 12px;
         }
-        .header-title h1 {
-            font-size: 17px;
+        .window-header h1 {
+            font-size: 18px;
             font-weight: 700;
         }
-        .header-title p {
-            font-size: 12px;
-            color: var(--text-sub);
-        }
-        .meta-stats {
-            display: flex;
-            gap: 16px;
+        .meta-status {
             font-family: var(--mono);
             font-size: 12px;
+            display: flex;
+            gap: 16px;
             color: var(--text-sub);
         }
-        .meta-stats strong {
+        .meta-status strong {
             color: var(--text-main);
         }
 
-        /* Toolbar: Operace zadání */
+        /* Toolbar dle zadání */
         .toolbar {
             background: var(--surface-sub);
             border-bottom: 1px solid var(--border);
@@ -341,7 +471,7 @@ try {
             gap: 8px;
             align-items: center;
         }
-        .nav-group {
+        .btn-group {
             display: inline-flex;
             gap: 4px;
         }
@@ -370,11 +500,11 @@ try {
             pointer-events: none;
         }
         .btn-primary {
-            background: var(--text-main);
+            background: var(--primary);
             color: #ffffff;
-            border-color: var(--text-main);
+            border-color: var(--primary);
         }
-        .btn-primary:hover {
+        .btn-primary:hover:not(.disabled) {
             background: #334155;
         }
         .btn-danger {
@@ -388,58 +518,81 @@ try {
         /* Flash */
         .flash {
             padding: 12px 20px;
+            border-bottom: 1px solid var(--border);
             font-size: 13px;
             font-weight: 500;
-            border-bottom: 1px solid var(--border);
         }
         .flash-success { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
         .flash-error { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
-        .flash-info { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
 
         /* Window Body */
-        .content {
-            padding: 32px 24px;
-            min-height: 280px;
+        .window-body {
+            padding: 24px 20px;
+            min-height: 380px;
             display: flex;
             flex-direction: column;
-            justify-content: center;
+            gap: 16px;
         }
 
-        /* Den Detail */
-        .day-display {
-            text-align: center;
+        .day-title-row {
             display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 12px;
+            justify-content: space-between;
+            align-items: baseline;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
         }
-        .day-label {
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            color: var(--text-sub);
-            font-weight: 600;
-        }
-        .day-value {
-            font-size: 32px;
+        .day-title {
+            font-size: 22px;
             font-weight: 700;
-            letter-spacing: -0.02em;
-            font-family: var(--sans);
+            letter-spacing: -0.01em;
         }
-        .node-pointer-info {
+        .day-meta {
             font-family: var(--mono);
             font-size: 12px;
             color: var(--text-sub);
-            background: var(--surface-sub);
-            padding: 4px 10px;
-            border-radius: 3px;
+            display: flex;
+            gap: 12px;
+        }
+
+        /* Entries List (záznamy dne nad polem) */
+        .entries-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .entry-card {
             border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 14px 16px;
+            background: #ffffff;
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+        }
+        .entry-card:hover {
+            border-color: var(--border-strong);
+        }
+        .entry-num {
+            font-family: var(--mono);
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-sub);
+            width: 28px;
+            flex-shrink: 0;
+            padding-top: 1px;
+        }
+        .entry-content {
+            flex-grow: 1;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 14px;
         }
 
         /* Empty state */
         .empty-state {
+            margin: auto 0;
             text-align: center;
-            padding: 32px 0;
+            padding: 48px 20px;
             color: var(--text-sub);
         }
         .empty-state h2 {
@@ -448,42 +601,7 @@ try {
             margin-bottom: 6px;
         }
 
-        /* Seznam uzlů linkovaného seznamu dole */
-        .nodes-strip {
-            border-top: 1px solid var(--border);
-            padding: 14px 20px;
-            background: #fafbfc;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            overflow-x: auto;
-            font-family: var(--mono);
-            font-size: 12px;
-        }
-        .node-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 8px;
-            background: #fff;
-            border: 1px solid var(--border);
-            border-radius: 3px;
-            text-decoration: none;
-            color: var(--text-main);
-            white-space: nowrap;
-        }
-        .node-item.active {
-            border-color: var(--accent);
-            background: #eff6ff;
-            font-weight: 600;
-            color: var(--accent);
-        }
-        .arrow {
-            color: var(--text-sub);
-            user-select: none;
-        }
-
-        /* Modal */
+        /* Modal Overlay */
         .modal-overlay {
             position: fixed;
             inset: 0;
@@ -499,11 +617,12 @@ try {
             border: 1px solid var(--border-strong);
             border-radius: 4px;
             width: 100%;
-            max-width: 440px;
+            max-width: 480px;
             padding: 20px;
             display: flex;
             flex-direction: column;
             gap: 16px;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
         }
         .modal-box h3 {
             font-size: 16px;
@@ -521,7 +640,7 @@ try {
             font-weight: 600;
             color: var(--text-sub);
         }
-        input[type="text"] {
+        input[type="text"], textarea {
             font-family: var(--sans);
             font-size: 13px;
             padding: 8px 10px;
@@ -529,8 +648,12 @@ try {
             border-radius: 3px;
             outline: none;
         }
-        input[type="text"]:focus {
-            border-color: var(--accent);
+        input[type="text"]:focus, textarea:focus {
+            border-color: var(--primary);
+        }
+        textarea {
+            resize: vertical;
+            min-height: 90px;
         }
         .modal-footer {
             display: flex;
@@ -543,53 +666,45 @@ try {
 </head>
 <body>
 
-<div class="window">
-    <!-- Horní stavový pruh -->
-    <header>
-        <div class="header-title">
-            <h1>Deník &ndash; Spojový seznam dnů (ALM)</h1>
-            <p>Implementováno čistě nad spojovým seznamem <code>days</code> v PostgreSQL RAM slotu</p>
+<div class="app-window">
+    <!-- Stavový řádek dle zadání -->
+    <div class="window-header">
+        <div>
+            <h1>Deník (ALM)</h1>
         </div>
-        <div class="meta-stats">
+        <div class="meta-status">
             <div>Dny: <strong><?= $totalDays ?></strong></div>
-            <div>Pozice: <strong><?= $totalDays > 0 ? ($currIdx + 1) . " / $totalDays" : "0 / 0" ?></strong></div>
+            <div>Záznamů dnes: <strong><?= $totalEntries ?></strong></div>
+            <?php if ($currentDayStr): ?>
+                <div>Aktuální den: <strong><?= htmlspecialchars($currentDayStr) ?></strong></div>
+            <?php endif; ?>
             <div>RAM: <strong><?= $ramUsed ?> / 4096 B</strong></div>
         </div>
-    </header>
+    </div>
 
-    <!-- Toolbar: Přesné operace ze zadání -->
+    <!-- Toolbar se všemi operacemi ze zadání -->
     <div class="toolbar">
-        <!-- Listování spojovým seznamem -->
-        <div class="nav-group">
-            <a href="?idx=0" class="btn <?= ($totalDays === 0 || $currIdx === 0) ? 'disabled' : '' ?>" title="zacatek">
+        <div class="btn-group">
+            <a href="?day_idx=0" class="btn <?= ($totalDays === 0 || $currIndex === 0) ? 'disabled' : '' ?>" title="zacatek">
                 &laquo; začátek
             </a>
-            <a href="?idx=<?= max(0, $currIdx - 1) ?>" class="btn <?= ($totalDays === 0 || $currIdx === 0) ? 'disabled' : '' ?>" title="predchozi">
+            <a href="?day_idx=<?= max(0, $currIndex - 1) ?>" class="btn <?= ($totalDays === 0 || $currIndex === 0) ? 'disabled' : '' ?>" title="predchozi">
                 &lsaquo; předchozí
             </a>
-            <a href="?idx=<?= min($totalDays - 1, $currIdx + 1) ?>" class="btn <?= ($totalDays === 0 || $currIdx >= $totalDays - 1) ? 'disabled' : '' ?>" title="dalsi">
+            <a href="?day_idx=<?= min($totalDays - 1, $currIndex + 1) ?>" class="btn <?= ($totalDays === 0 || $currIndex >= $totalDays - 1) ? 'disabled' : '' ?>" title="dalsi">
                 následující &rsaquo;
             </a>
-            <a href="?idx=<?= max(0, $totalDays - 1) ?>" class="btn <?= ($totalDays === 0 || $currIdx >= $totalDays - 1) ? 'disabled' : '' ?>" title="konec">
+            <a href="?day_idx=<?= max(0, $totalDays - 1) ?>" class="btn <?= ($totalDays === 0 || $currIndex >= $totalDays - 1) ? 'disabled' : '' ?>" title="konec">
                 konec &raquo;
             </a>
         </div>
 
         <div style="width: 1px; height: 24px; background: var(--border-strong); margin: 0 4px;"></div>
 
-        <!-- Operace: novy (nový den do linked listu) -->
-        <a href="?idx=<?= $currIdx ?>&modal=novy" class="btn btn-primary" title="novy">
-            + nový den
+        <!-- Operace: novy -->
+        <a href="?day_idx=<?= $currIndex ?>&modal=novy" class="btn btn-primary" title="novy">
+            + nový záznam
         </a>
-
-        <!-- Operace: smaz (smaže vybraný aktuální den) -->
-        <?php if ($currentDay): ?>
-            <a href="?idx=<?= $currIdx ?>&smaz_potvrdit=<?= urlencode($currentDay) ?>" class="btn btn-danger" title="smaz">
-                smazat den
-            </a>
-        <?php else: ?>
-            <button class="btn btn-danger disabled" disabled>smazat den</button>
-        <?php endif; ?>
 
         <!-- Operace: uloz -->
         <form method="POST" style="margin: 0;">
@@ -602,132 +717,142 @@ try {
         <!-- Operace: nacti -->
         <label class="btn" style="cursor: pointer;" title="nacti">
             načti ze souboru
-            <input type="file" id="fileIn" accept=".json" style="display: none;" onchange="document.getElementById('proxyUpload').submit();">
+            <input type="file" id="filePicker" accept=".json" style="display: none;" onchange="document.getElementById('importSubmit').submit();">
         </label>
-        <form id="proxyUpload" method="POST" enctype="multipart/form-data" style="display: none;">
+        <form id="importSubmit" method="POST" enctype="multipart/form-data" style="display: none;">
             <input type="hidden" name="action" value="nacti">
-            <input type="file" id="realFile" name="file" onchange="this.form.submit()">
+            <input type="file" id="fileHidden" name="file" onchange="this.form.submit();">
         </form>
         <script>
-            document.getElementById('fileIn').addEventListener('change', function() {
-                var real = document.getElementById('realFile');
-                real.files = this.files;
-                document.getElementById('proxyUpload').submit();
+            document.getElementById('filePicker').addEventListener('change', function() {
+                var h = document.getElementById('fileHidden');
+                h.files = this.files;
+                document.getElementById('importSubmit').submit();
             });
         </script>
 
         <!-- Operace: zavri -->
-        <form method="POST" style="margin-left: auto;" onsubmit="return confirm('Opravdu ukončit relaci?');">
+        <form method="POST" style="margin-left: auto;" onsubmit="return confirm('Opravdu ukončit relaci deníku?');">
             <input type="hidden" name="action" value="zavri">
             <button type="submit" class="btn" title="zavri">zavři</button>
         </form>
     </div>
 
-    <!-- Flash zprávy -->
+    <!-- Flash hláška -->
     <?php if ($flash): ?>
         <div class="flash flash-<?= $flashType ?>">
             <?= htmlspecialchars($flash) ?>
         </div>
     <?php endif; ?>
 
-    <!-- Tělo: Zobrazení aktuálního dne -->
-    <div class="content">
+    <!-- Tělo: aktuální den a očíslované záznamy dne -->
+    <div class="window-body">
         <?php if ($totalDays === 0): ?>
             <div class="empty-state">
-                <h2>Spojový seznam je prázdný</h2>
-                <p>Deník zatím neobsahuje žádné dny. Vytvořte první den kliknutím na tlačítko <strong>+ nový den</strong>.</p>
+                <h2>Deník je prázdný</h2>
+                <p style="margin-top: 6px;">Po spuštění je deník prázdný. Klikněte na <strong>+ nový záznam</strong> pro zadání data a prvního textu.</p>
                 <div style="margin-top: 16px;">
-                    <a href="?modal=novy" class="btn btn-primary">+ Vytvořit první den</a>
+                    <a href="?modal=novy" class="btn btn-primary">+ Vytvořit první záznam</a>
                 </div>
             </div>
         <?php else: ?>
-            <div class="day-display">
-                <div class="day-label">Aktuálně vybraný den</div>
-                <div class="day-value"><?= htmlspecialchars($currentDay) ?></div>
-                <div class="node-pointer-info">
-                    Uzel spojového seznamu #<?= $currIdx + 1 ?> z <?= $totalDays ?> (LLGetAll)
+            <div class="day-title-row">
+                <div class="day-title"><?= htmlspecialchars($currentDayStr) ?></div>
+                <div class="day-meta">
+                    <span>Den <?= $currIndex + 1 ?> z <?= $totalDays ?></span>
+                    <?php if ($arrayInfo): ?>
+                        <span>| Pole: <?= $arrayInfo['size'] ?> / <?= $arrayInfo['capacity'] ?> položek</span>
+                    <?php endif; ?>
                 </div>
+            </div>
+
+            <div class="entries-list">
+                <?php foreach ($entries as $idx => $content): ?>
+                    <div class="entry-card">
+                        <div class="entry-num"><?= $idx + 1 ?>.</div>
+                        <div class="entry-content"><?= nl2br(htmlspecialchars($content)) ?></div>
+                        <div>
+                            <a href="?day_idx=<?= $currIndex ?>&smaz_idx=<?= $idx ?>" class="btn btn-danger" style="padding: 4px 8px; font-size: 11px;" title="smaz">
+                                smazat
+                            </a>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
             </div>
         <?php endif; ?>
     </div>
-
-    <!-- Řetězec uzlů linked listu (pro vizuální přehled procházení) -->
-    <?php if ($totalDays > 0): ?>
-        <div class="nodes-strip">
-            <span style="color: var(--text-sub); font-size: 11px; text-transform: uppercase; font-weight: bold;">HEAD &rarr;</span>
-            <?php foreach ($days as $i => $d): ?>
-                <a href="?idx=<?= $i ?>" class="node-item <?= $i === $currIdx ? 'active' : '' ?>">
-                    <span><?= htmlspecialchars($d) ?></span>
-                </a>
-                <?php if ($i < $totalDays - 1): ?>
-                    <span class="arrow">&rarr;</span>
-                <?php else: ?>
-                    <span class="arrow">&rarr; NULL</span>
-                <?php endif; ?>
-            <?php endforeach; ?>
-        </div>
-    <?php endif; ?>
 </div>
 
-<!-- ==========================================
-     MODÁL: nový den (zadání data)
-     Pravidla:
-     - První den: vytvoří head_pointer
-     - Datum mezi aktuálním a dalším: vloží za aktuální
-     - Jinak odmítnuto
-========================================== -->
+<!-- ========================================================
+     MODÁL: novy
+     Pravidla dle zadání:
+     - Datum = aktuální den -> přidá se na konec jeho seznamu (AddToArray)
+     - Datum mezi aktuálním a následujícím -> vznikne nový den za aktuálním
+     - Jinak se zápis odmítne
+======================================================== -->
 <?php if (isset($_GET['modal']) && $_GET['modal'] === 'novy'): ?>
     <?php
-        $prefillDate = $_GET['date'] ?? date('d.m.Y');
+        $prefillDate = $_GET['date'] ?? ($currentDayStr ?: date('d.m.Y'));
+        $prefillText = $_GET['text'] ?? '';
     ?>
     <div class="modal-overlay">
         <div class="modal-box">
-            <h3>Nový den do spojového seznamu</h3>
+            <h3>Nový záznam</h3>
             <form method="POST">
-                <input type="hidden" name="action" value="novy_den">
-                <input type="hidden" name="idx" value="<?= $currIdx ?>">
+                <input type="hidden" name="action" value="novy">
+                <input type="hidden" name="day_idx" value="<?= $currIndex ?>">
 
                 <div class="form-group">
                     <label>Datum (dd.MM.yyyy):</label>
                     <input type="text" name="date" value="<?= htmlspecialchars($prefillDate) ?>" placeholder="např. 12.11.2026" required autofocus>
-                    <?php if ($currentDay): ?>
-                        <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
-                            Aktuální den: <strong><?= htmlspecialchars($currentDay) ?></strong>
-                            <?php if (isset($days[$currIdx + 1])): ?>
-                                | Následující: <strong><?= htmlspecialchars($days[$currIdx + 1]) ?></strong>
-                            <?php else: ?>
-                                | (poslední uzel seznamu)
+                    <?php if ($currentDayStr): ?>
+                        <div style="font-size: 11px; color: var(--text-sub); margin-top: 3px;">
+                            Aktuální den: <strong><?= htmlspecialchars($currentDayStr) ?></strong>
+                            <?php if (isset($days[$currIndex + 1])): ?>
+                                | Následující den: <strong><?= htmlspecialchars($days[$currIndex + 1]) ?></strong>
                             <?php endif; ?>
                         </div>
                     <?php endif; ?>
                 </div>
 
+                <div class="form-group" style="margin-top: 8px;">
+                    <label>Text záznamu (víceřádkový):</label>
+                    <textarea name="text" placeholder="Zadejte text nového záznamu..." required><?= htmlspecialchars($prefillText) ?></textarea>
+                </div>
+
                 <div class="modal-footer">
-                    <a href="?idx=<?= $currIdx ?>" class="btn">Zrušit</a>
-                    <button type="submit" class="btn btn-primary">Vložit den (LLAddNode)</button>
+                    <a href="?day_idx=<?= $currIndex ?>" class="btn">Zrušit</a>
+                    <button type="submit" class="btn btn-primary">Uložit záznam</button>
                 </div>
             </form>
         </div>
     </div>
 <?php endif; ?>
 
-<!-- ==========================================
-     MODÁL: potvrzení smazání dne
-========================================== -->
-<?php if ($deleteConfirm !== null): ?>
+<!-- ========================================================
+     MODÁL: smaz (potvrzení mazání vybraného záznamu)
+     "uživatel vybere záznam, program ho zobrazí a vyžádá potvrzení"
+======================================================== -->
+<?php if ($deleteConfirmIdx !== null && $deleteConfirmText !== null): ?>
     <div class="modal-overlay">
         <div class="modal-box">
-            <h3>Potvrdit smazání dne</h3>
+            <h3>Potvrzení smazání záznamu</h3>
             <p style="font-size: 13px; color: var(--text-sub);">
-                Opravdu si přejete vymazat den <strong><?= htmlspecialchars($deleteConfirm) ?></strong> ze spojového seznamu (voláním <code>LLDeleteNode</code>)?
+                Opravdu chcete smazat záznam č. <strong><?= $deleteConfirmIdx + 1 ?></strong> ze dne <strong><?= htmlspecialchars($currentDayStr) ?></strong>?
+            </p>
+            <div style="background: #f8fafc; border: 1px solid var(--border); padding: 12px; border-radius: 4px; font-size: 13px; white-space: pre-wrap;">
+                <?= htmlspecialchars($deleteConfirmText) ?>
+            </div>
+            <p style="font-size: 12px; color: #b91c1c;">
+                <em>Pokud po smazání v daném dni nezbude žádný záznam, den automaticky zanikne.</em>
             </p>
             <div class="modal-footer">
-                <a href="?idx=<?= $currIdx ?>" class="btn">Zpět</a>
+                <a href="?day_idx=<?= $currIndex ?>" class="btn">Zpět</a>
                 <form method="POST" style="margin: 0;">
-                    <input type="hidden" name="action" value="smaz_den">
-                    <input type="hidden" name="idx" value="<?= $currIdx ?>">
-                    <input type="hidden" name="date" value="<?= htmlspecialchars($deleteConfirm) ?>">
-                    <button type="submit" class="btn btn-danger">Ano, smazat den</button>
+                    <input type="hidden" name="action" value="smaz_potvrzeno">
+                    <input type="hidden" name="day_idx" value="<?= $currIndex ?>">
+                    <input type="hidden" name="entry_idx" value="<?= $deleteConfirmIdx ?>">
+                    <button type="submit" class="btn btn-danger">Ano, smazat záznam</button>
                 </form>
             </div>
         </div>
