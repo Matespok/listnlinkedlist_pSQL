@@ -20,6 +20,22 @@ services:
       - "8080:8080"
     depends_on:
       - db
+  web:
+    build: .
+    container_name: php_web
+    restart: always
+    ports:
+      - "3000:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${user}
+      DB_PASS: ${pass}
+      DB_NAME: ${db}
+    depends_on:
+      - db
 
 volumes:
   postgres_data:

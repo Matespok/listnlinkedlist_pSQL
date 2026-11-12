@@ -116,4 +116,99 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION ReadString(ptr INT)
+RETURNS TEXT AS $$
+DECLARE
+  delimiter_pos INT;
+  raw_bytes BYTEA;
+BEGIN
+  SELECT position(E'\\x03'::bytea IN substring(ram_slot from ptr)) INTO delimiter_pos FROM motherboard;
+  IF delimiter_pos = 0 THEN
+    RETURN NULL;
+  END IF;
+  
+  SELECT substring(ram_slot from ptr for (delimiter_pos - 1)) INTO raw_bytes FROM motherboard;
+  
+  RETURN convert_from(raw_bytes, 'UTF8');
+END;
+$$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION LLGetAll(list_name TEXT)
+RETURNS TABLE(val TEXT) AS $$
+DECLARE
+  curr_node INT;
+  val_ptr INT;
+  next_node INT;
+BEGIN
+  SELECT head_pointer INTO curr_node
+  FROM Linked_List_Headers
+  WHERE name = list_name;
+
+  IF curr_node IS NULL THEN
+    RETURN;
+  END IF;
+
+  LOOP
+    val_ptr := ReadText(curr_node, 4)::INT;
+    val := ReadString(val_ptr);
+    RETURN NEXT;
+    next_node := ReadText(curr_node + 4, 4)::INT;
+    IF next_node = 0 THEN
+      EXIT;
+    END IF;
+    
+    curr_node := next_node;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+/*
+
+
+*/
+CREATE OR REPLACE FUNCTION LLDeleteNode(list_name TEXT, target_val TEXT)
+RETURNS VOID AS $$
+DECLARE
+  curr_node INT;
+  prev_node INT := NULL;
+  next_node INT;
+  val_ptr INT;
+  curr_text TEXT;
+BEGIN
+  SELECT head_pointer INTO curr_node
+  FROM Linked_List_Headers
+  WHERE name = list_name;
+  
+  IF curr_node IS NULL THEN
+    RETURN;
+  END IF;
+  
+  LOOP
+    val_ptr := ReadText(curr_node, 4)::INT;
+    curr_text := ReadString(val_ptr);
+    next_node := ReadText(curr_node + 4, 4)::INT;
+    IF curr_text = target_val THEN
+      IF prev_node IS NULL THEN
+        IF next_node = 0 THEN
+          DELETE FROM Linked_List_Headers WHERE name = list_name;
+        ELSE
+          UPDATE Linked_List_Headers SET head_pointer = next_node WHERE name = list_name;
+        END IF;
+      ELSE
+        PERFORM WriteText(prev_node + 4, lpad(next_node::text, 4, '0'));
+      END IF;
+      PERFORM Free(val_ptr, octet_length(curr_text) + 1);
+      PERFORM Free(curr_node, 8);
+      RETURN; 
+    END IF;
+    IF next_node = 0 THEN
+      EXIT;
+    END IF;
+    prev_node := curr_node;
+    curr_node := next_node;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- List over fixed array
