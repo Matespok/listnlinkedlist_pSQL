@@ -13,8 +13,18 @@ It's linked list and list over fixed array with whole backend in PL/PGSQL. I had
 ## Running localy:
 
 1. make sure to have docker installed
-2. run `docker compose up -d`
-3. go to `localhost:3000` in web browser and enjoy
+2. make `.env` and fill it:
+
+```bash
+host=localhost
+port=5432
+user=username
+pass=pass
+db=ramlmao
+```
+
+3. run `docker compose up -d`
+4. go to `localhost:3000` in web browser and enjoy
 
 ---
 
@@ -59,3 +69,7 @@ Tables for this:
 ---
 
 AI USAGE: AI has been used for research, frontend(src/index.php as a whole), and to locate mistakes, or corret logic errors on backend. Therefore i wrote 8 hours on this project: https://hackatime.hackclub.com/@matespok/project/linkednlist . 8 hours not counting thinking about the project itself, educating myself on the topic and writing some notes...
+
+```
+
+```
