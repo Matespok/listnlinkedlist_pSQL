@@ -55,3 +55,7 @@ Tables for this:
 - **Free Space:** Unallocated memory represented by null bytes (`0x00`).
 - **Linked List Node:** Contiguous **8-byte** block (`[4B value_ptr][4B next_node_ptr]`).
 - **Fixed Array Block:** Contiguous `capacity * 4` byte block of **4-byte** value pointers.
+
+---
+
+AI USAGE: AI has been used for research, frontend(src/index.php as a whole), and to locate mistakes, or corret logic errors on backend. Therefore i wrote 8 hours on this project: https://hackatime.hackclub.com/@matespok/project/linkednlist
