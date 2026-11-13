@@ -149,7 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $nextDt = $nextDayStr ? parseCzechDate($nextDayStr) : null;
 
             if ($dateFormatted === $currentDayStr) {
-                // A) Datum = aktuální den -> přidat na konec seznamu záznamů dne
+                // A) Datum = aktuální den -> přidat záznam na konec pole daného dne
                 $arrName = 'day_' . $dateFormatted;
                 $stmtCheck = $pdo->prepare("SELECT first_pointer FROM Fixed_Array_Headers WHERE name = :name");
                 $stmtCheck->execute(['name' => $arrName]);
@@ -168,39 +168,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 header("Location: ?day_idx=$currIndex");
                 exit;
 
-            } elseif ($nextDt && ($dt > $currentDt && $dt < $nextDt)) {
-                // B) Datum mezi aktuálním a následujícím dnem -> vznikne nový den za aktuálním
-                $newDays = [];
-                for ($i = 0; $i <= $currIndex; $i++) {
-                    $newDays[] = $days[$i];
-                }
-                $newDays[] = $dateFormatted;
-                for ($i = $currIndex + 1; $i < count($days); $i++) {
-                    $newDays[] = $days[$i];
-                }
-
-                $pdo->beginTransaction();
-                $pdo->exec("DELETE FROM Linked_List_Headers WHERE name = 'days'");
-                $stmtInit = $pdo->prepare("SELECT InitializeLinkedList('days', :val)");
-                $stmtInit->execute(['val' => $newDays[0]]);
-
-                $stmtAdd = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
-                for ($i = 1; $i < count($newDays); $i++) {
-                    $stmtAdd->execute(['val' => $newDays[$i]]);
-                }
-
-                $stmtArr = $pdo->prepare("SELECT InitializeArray(:name, :firstVal)");
-                $stmtArr->execute(['name' => 'day_' . $dateFormatted, 'firstVal' => $text]);
-                $pdo->commit();
-
-                $newIndex = $currIndex + 1;
-                $_SESSION['flash'] = "Nový den '$dateFormatted' byl vložen za aktuální den.";
-                $_SESSION['flashType'] = 'success';
-                header("Location: ?day_idx=$newIndex");
-                exit;
-
-            } elseif (!$nextDt && ($dt > $currentDt)) {
-                // C) Datum za posledním dnem
+            } elseif (!in_array($dateFormatted, $days, true)) {
+                // B) Nový den -> vkládá se čistě na konec spojového seznamu přes LLAddNode
                 $pdo->beginTransaction();
                 $stmtAdd = $pdo->prepare("SELECT LLAddNode(:val, 'days')");
                 $stmtAdd->execute(['val' => $dateFormatted]);
@@ -210,22 +179,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->commit();
 
                 $newIndex = count($days);
-                $_SESSION['flash'] = "Nový den '$dateFormatted' byl přidán na konec deníku.";
+                $_SESSION['flash'] = "Nový den '$dateFormatted' byl vložen na konec spojového seznamu (LLAddNode).";
                 $_SESSION['flashType'] = 'success';
                 header("Location: ?day_idx=$newIndex");
                 exit;
 
             } else {
-                // D) Zápis odmítnut
-                $range = $currentDayStr;
-                if ($nextDayStr) {
-                    $range .= " a $nextDayStr";
-                } else {
-                    $range .= " a novější";
-                }
-                $_SESSION['flash'] = "Zápis odmítnut! Dle zadání musí být datum rovno aktuálnímu dni ($currentDayStr) nebo ležet mezi $range.";
-                $_SESSION['flashType'] = 'error';
-                header("Location: ?day_idx=$currIndex");
+                // C) Den už v seznamu existuje, ale není aktuálně otevřený
+                $targetIdx = array_search($dateFormatted, $days, true);
+                $_SESSION['flash'] = "Den $dateFormatted již v seznamu existuje. Přejděte na něj pro přidání záznamu.";
+                $_SESSION['flashType'] = 'info';
+                header("Location: ?day_idx=$targetIdx");
                 exit;
             }
 
